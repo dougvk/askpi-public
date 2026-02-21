@@ -1,0 +1,41 @@
+{
+  "id": "askpi",
+  "name": "askpi",
+  "description": "One Pi (RPC) tmux session per chat, with callbacks on completion.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["token"],
+    "properties": {
+      "token": { "type": "string", "description": "Shared secret for /askpi/notify auth" },
+      "tmuxPrefix": { "type": "string", "description": "tmux session name prefix (default: clawd-pi)" },
+      "httpPath": { "type": "string", "description": "HTTP path for notify handler" },
+      "deliveryResolvers": {
+        "type": "array",
+        "description": "Custom sessionKey -> delivery target mapping rules.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["channel", "pattern", "toTemplate"],
+          "properties": {
+            "channel": { "type": "string", "description": "Channel id (e.g. slack, signal)" },
+            "pattern": { "type": "string", "description": "Regex pattern applied to sessionKey" },
+            "toTemplate": { "type": "string", "description": "Template for outbound target (use $1..)" },
+            "threadIdTemplate": { "type": "string", "description": "Template for thread id (optional)" },
+            "messageThreadIdTemplate": {
+              "type": "string",
+              "description": "Template for message thread id (optional)"
+            },
+            "accountIdTemplate": { "type": "string", "description": "Template for account id (optional)" }
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "token": { "sensitive": true, "label": "Notify token" },
+    "tmuxPrefix": { "advanced": true, "label": "tmuxPrefix" },
+    "httpPath": { "advanced": true, "label": "httpPath" },
+    "deliveryResolvers": { "advanced": true, "label": "Delivery resolvers" }
+  }
+}
