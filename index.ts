@@ -244,21 +244,14 @@ type CodingSessionRecordV1 = {
 };
 
 type CodingSessionsToolAction =
-  | "ensure"
+  | "help"
+  | "new"
   | "send"
   | "reset"
-  | "inspect"
   | "stop"
-  | "rehydrate"
-  | "list"
+  | "status"
   | "handoff"
-  | "resume"
-  | "peek"
-  | "diagnose"
-  | "fix-delivery"
-  | "gc"
-  | "prune"
-  | "restore-all";
+  | "resume";
 
 // Plain JSON schema (avoids requiring TypeBox installed next to this plugin).
 const CodingSessionsToolSchema = {
@@ -267,12 +260,11 @@ const CodingSessionsToolSchema = {
   properties: {
     action: {
       type: "string",
-      description:
-        "Action: ensure|send|reset|inspect|stop|rehydrate|list|handoff|resume|peek|diagnose|fix-delivery|gc|prune|restore-all",
+      description: "Action: help|new|send|reset|stop|status|handoff|resume",
     },
     cwd: {
       type: "string",
-      description: "Absolute path to the project directory. Required for ensure; optional for send when session exists.",
+      description: "Absolute path to the project directory (optional for action=new).",
     },
     message: { type: "string", description: "Message to send to Pi." },
 
@@ -284,21 +276,6 @@ const CodingSessionsToolSchema = {
     // Deprecated: we do not support interrupt/steer. Mode is accepted for backward compatibility
     // but ignored. The tool will either start a prompt immediately (idle) or queue a follow-up (busy).
     mode: { type: "string", description: "(deprecated) Ignored. The tool queues follow-ups when Pi is busy." },
-    lines: { type: "number", description: "Lines to capture for inspect (default 120)." },
-    prepare: {
-      type: "boolean",
-      description:
-        "(deprecated) Formerly used to stop the RPC Pi before handoff. Handoff now always restarts tmux cleanly.",
-    },
-    dryRun: {
-      type: "boolean",
-      description: "If true, do not write/delete anything (preview only).",
-    },
-    olderThanDays: {
-      type: "number",
-      description:
-        "For gc/prune: prune artifacts older than this many days (default 30). Values < 1 disable pruning.",
-    },
   },
   required: ["action"],
 };
@@ -1046,8 +1023,17 @@ function resolveRecordPath(agentRootDir: string, sessionKey: string): string {
   return path.join(resolveAskpiDir(agentRootDir), `${shortHash(sessionKey)}.json`);
 }
 
+function resolveAskpiArchiveDir(agentRootDir: string): string {
+  return path.join(resolveAskpiDir(agentRootDir), "archive");
+}
+
 function resolveCodingSessionId(sessionKey: string): string {
   return `cs_${shortHash(sessionKey)}`;
+}
+
+function createCodingSessionId(sessionKey: string): string {
+  const suffix = shortHash(`${Date.now()}-${crypto.randomUUID()}`);
+  return `cs_${shortHash(sessionKey)}_${suffix}`;
 }
 
 function resolvePiSessionDir(agentRootDir: string, sessionKey: string): string {
@@ -1074,6 +1060,109 @@ function resolveFreshPiSessionDir(agentRootDir: string, sessionKey: string): str
   const base = resolvePiSessionDir(agentRootDir, sessionKey);
   const suffix = new Date().toISOString().replace(/[:.]/g, "-");
   return `${base}-fresh-${suffix}`;
+}
+
+const REMOVED_ASKPI_COMMANDS = new Set([
+  "ensure",
+  "inspect",
+  "rehydrate",
+  "list",
+  "peek",
+  "diagnose",
+  "fix-delivery",
+  "gc",
+  "prune",
+  "restore-all",
+  "info",
+  "attach",
+  "tui",
+]);
+
+const REMOVED_ASKPI_ACTIONS = new Set([
+  "ensure",
+  "inspect",
+  "rehydrate",
+  "list",
+  "peek",
+  "diagnose",
+  "fix-delivery",
+  "gc",
+  "prune",
+  "restore-all",
+]);
+
+function renderAskpiHelpText(): string {
+  return [
+    "askpi",
+    "",
+    "One long-running Pi (RPC) session per chat/thread/topic.",
+    "",
+    "Commands:",
+    "- /askpi help",
+    "- /askpi status",
+    "- /askpi new [/ABS/PATH]",
+    "- /askpi <prompt>",
+    "- /askpi stop",
+    "- /askpi reset",
+    "- /askpi handoff",
+    "- /askpi resume",
+    "",
+    "Notes:",
+    "- /askpi new archives any previous session and starts fresh.",
+    "- /askpi reset keeps the same session id and restarts the coding runtime.",
+  ].join("\n");
+}
+
+export function parseAskpiRawCommand(rawCommand: string):
+  | { action: "help" | "status" | "new" | "stop" | "reset" | "handoff" | "resume" }
+  | { action: "new"; cwd: string }
+  | { action: "send"; message: string }
+  | { error: string } {
+  const trimmed = rawCommand.trim();
+  if (!trimmed) return { action: "help" };
+
+  const firstSpace = trimmed.search(/\s/);
+  const verb = (firstSpace < 0 ? trimmed : trimmed.slice(0, firstSpace)).toLowerCase();
+  const rest = firstSpace < 0 ? "" : trimmed.slice(firstSpace + 1).trim();
+
+  if (REMOVED_ASKPI_COMMANDS.has(verb)) {
+    return { error: `Unknown /askpi command: ${verb}. Run /askpi help.` };
+  }
+
+  if (verb === "help" && !rest) return { action: "help" };
+  if (verb === "status" && !rest) return { action: "status" };
+  if (verb === "stop" && !rest) return { action: "stop" };
+  if (verb === "reset" && !rest) return { action: "reset" };
+  if (verb === "handoff" && !rest) return { action: "handoff" };
+  if (verb === "resume" && !rest) return { action: "resume" };
+  if (verb === "new") {
+    if (!rest) return { action: "new" };
+    if (rest.startsWith("/")) return { action: "new", cwd: rest };
+  }
+
+  return { action: "send", message: trimmed };
+}
+
+async function archiveAskpiRecord(params: {
+  agentRootDir: string;
+  sessionKey: string;
+  record: CodingSessionRecordV1;
+  reason: "new";
+}): Promise<string> {
+  const archiveDir = resolveAskpiArchiveDir(params.agentRootDir);
+  await fs.mkdir(archiveDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const archivePath = path.join(
+    archiveDir,
+    `${shortHash(params.sessionKey)}-${stamp}-${params.reason}.json`,
+  );
+  await writeJsonAtomic(archivePath, {
+    archivedAt: Date.now(),
+    sessionKey: params.sessionKey,
+    reason: params.reason,
+    record: params.record,
+  });
+  return archivePath;
 }
 
 function resolvePiExtensionPath(): string {
@@ -1103,6 +1192,7 @@ async function buildRecord(params: {
   sessionKey: string;
   cwd: string;
   tmuxName: string;
+  codingSessionId?: string;
   deliveryResolvers?: DeliveryResolverConfig[];
 }): Promise<CodingSessionRecordV1> {
   const piSessionDir = resolvePiSessionDir(params.agentRootDir, params.sessionKey);
@@ -1119,7 +1209,7 @@ async function buildRecord(params: {
     version: 1,
     sessionKey: params.sessionKey,
     agentId: params.agentId,
-    codingSessionId: resolveCodingSessionId(params.sessionKey),
+    codingSessionId: params.codingSessionId ?? createCodingSessionId(params.sessionKey),
     delivery:
       (await readSessionDeliveryHint({
         agentRootDir: params.agentRootDir,
@@ -1252,6 +1342,10 @@ async function handleNotify(api: any, req: any, res: any): Promise<boolean> {
   const completionId = computeCompletionId(payload) ?? "";
   const piSessionId = typeof payload.piSessionId === "string" ? payload.piSessionId.trim() : undefined;
   const piSessionFile = typeof payload.piSessionFile === "string" ? payload.piSessionFile.trim() : undefined;
+  const askpiSessionId =
+    typeof payload.askpiSessionId === "string" && payload.askpiSessionId.trim()
+      ? payload.askpiSessionId.trim()
+      : undefined;
 
   if (!sessionKey || !eventId || !completionId) {
     res.statusCode = 400;
@@ -1308,7 +1402,7 @@ async function handleNotify(api: any, req: any, res: any): Promise<boolean> {
           version: 1,
           sessionKey,
           agentId,
-          codingSessionId: resolveCodingSessionId(sessionKey),
+          codingSessionId: askpiSessionId ?? resolveCodingSessionId(sessionKey),
           tmux: {
             name:
               typeof payload.tmuxSession === "string" && payload.tmuxSession.trim()
@@ -1371,7 +1465,7 @@ async function handleNotify(api: any, req: any, res: any): Promise<boolean> {
           version: 1,
           sessionKey,
           agentId,
-          codingSessionId: resolveCodingSessionId(sessionKey),
+          codingSessionId: askpiSessionId ?? resolveCodingSessionId(sessionKey),
           delivery: mergedDelivery,
           tmux: {
             name:
@@ -1503,140 +1597,41 @@ export default {
         name: "askpi",
         label: "askpi",
         description:
-          "Manage a long-running Pi session in tmux for the current chat (sessionKey-scoped). Actions: ensure, send, reset, inspect, stop, rehydrate, list, handoff, resume, peek, diagnose, fix-delivery, gc, prune.",
+          "Manage a per-chat Pi RPC session. Commands: help, status, new, send, stop, reset, handoff, resume.",
         parameters: CodingSessionsToolSchema,
         execute: async (_toolCallId: string, args: any) => {
           const params = (args ?? {}) as Record<string, unknown>;
 
-          // Support upstream skill-command tool dispatch payload:
-          // { command: "<raw args>", commandName: "<slash command>", skillName: "<skill name>" }
-          // while keeping backward compatibility with the existing structured tool schema.
           const rawCommand = typeof params.command === "string" ? params.command.trim() : "";
           const invokedViaCommandDispatch = typeof params.commandName === "string" || typeof params.skillName === "string";
 
-          // If invoked via /askpi (skill-command tool dispatch) and no args were provided,
-          // show the help text instead of failing with "action required".
           if (invokedViaCommandDispatch && !rawCommand && params.action === undefined) {
-            return textResult(
-              [
-                "askpi",
-                "",
-                "One long-running Pi (RPC) tmux session per chat/thread/topic.",
-                "",
-                "Commands:",
-                "- /askpi ensure /ABS/PATH",
-                "- /askpi <prompt>",
-                "- /askpi stop",
-                "- /askpi reset [optional /ABS/PATH]",
-                "- /askpi handoff (aliases: attach, tui)",
-                "- /askpi resume",
-                "- /askpi diagnose",
-                "- /askpi inspect [lines]",
-                "- /askpi gc [days] [--dry-run]",
-                "- /askpi prune [days] [--dry-run]",
-                "- /askpi restore-all [--dry-run]",
-                "",
-                "Notes:",
-                "- Use ensure/reset to change cwd.",
-                "- Results are delivered asynchronously when Pi finishes.",
-              ].join("\n"),
-            );
+            params.action = "help";
           }
 
-          const isRawCommandInvocation = rawCommand.length > 0 && params.action === undefined;
-          if (isRawCommandInvocation) {
-            const lower = rawCommand.toLowerCase();
-
-            if (/^(info|help)\b/.test(lower)) {
-              return textResult(
-                [
-                  "askpi",
-                  "",
-                  "One long-running Pi (RPC) tmux session per chat/thread/topic.",
-                  "",
-                  "Commands:",
-                  "- /askpi ensure /ABS/PATH",
-                  "- /askpi <prompt>",
-                  "- /askpi stop",
-                  "- /askpi reset [optional /ABS/PATH]",
-                  "- /askpi handoff (aliases: attach, tui)",
-                  "- /askpi resume",
-                  "- /askpi diagnose",
-                  "- /askpi inspect [lines]",
-                  "- /askpi gc [days] [--dry-run]",
-                  "- /askpi prune [days] [--dry-run]",
-                  "- /askpi restore-all [--dry-run]",
-                  "",
-                  "Notes:",
-                  "- Use ensure/reset to change cwd.",
-                  "- Results are delivered asynchronously when Pi finishes.",
-                ].join("\n"),
-              );
+          if (rawCommand.length > 0 && params.action === undefined) {
+            const parsed = parseAskpiRawCommand(rawCommand);
+            if ("error" in parsed) {
+              return textResult(parsed.error, { ok: false, error: "unknown_command" });
             }
-
-            const parseDaysAndDryRun = (text: string): { olderThanDays?: number; dryRun?: boolean } => {
-              const parts = text
-                .trim()
-                .split(/\s+/)
-                .map((p) => p.trim())
-                .filter(Boolean);
-              const dryRun = parts.some((p) => p === "--dry-run" || p === "dry-run" || p === "--dryrun");
-              const dayToken = parts.find((p) => /^\d+$/.test(p));
-              const olderThanDays = dayToken ? Number.parseInt(dayToken, 10) : undefined;
-              return {
-                ...(typeof olderThanDays === "number" && Number.isFinite(olderThanDays) ? { olderThanDays } : {}),
-                ...(dryRun ? { dryRun: true } : {}),
-              };
-            };
-
-            if (/^ensure\b/.test(lower)) {
-              const cwd = rawCommand.replace(/^ensure\b\s*/i, "").trim();
-              params.action = "ensure";
-              params.cwd = cwd;
-            } else if (/^(handoff|attach|tui)\b/.test(lower)) {
-              params.action = "handoff";
-            } else if (/^resume\b/.test(lower)) {
-              params.action = "resume";
-            } else if (/^stop\b/.test(lower)) {
-              params.action = "stop";
-            } else if (/^reset\b/.test(lower)) {
-              const cwd = rawCommand.replace(/^reset\b\s*/i, "").trim();
-              params.action = "reset";
-              if (cwd) params.cwd = cwd;
-            } else if (/^inspect\b/.test(lower)) {
-              const m = rawCommand.match(/^inspect\b\s*(\d+)?/i);
-              const lines = m?.[1] ? Number.parseInt(m[1], 10) : undefined;
-              params.action = "inspect";
-              if (typeof lines === "number" && Number.isFinite(lines)) params.lines = lines;
-            } else if (/^list\b/.test(lower)) {
-              params.action = "list";
-            } else if (/^rehydrate\b/.test(lower)) {
-              params.action = "rehydrate";
-            } else if (/^peek\b/.test(lower)) {
-              params.action = "peek";
-            } else if (/^diagnose\b/.test(lower)) {
-              params.action = "diagnose";
-            } else if (/^fix[-_ ]?delivery\b/.test(lower)) {
-              params.action = "fix-delivery";
-            } else if (/^restore(?:-all)?\b/.test(lower)) {
-              const dryRun = /--dry-run|\bdry-run\b|--dryrun/i.test(rawCommand);
-              params.action = "restore-all";
-              if (dryRun) params.dryRun = true;
-            } else if (/^gc\b/.test(lower)) {
-              params.action = "gc";
-              Object.assign(params, parseDaysAndDryRun(rawCommand.replace(/^gc\b/i, "")));
-            } else if (/^prune\b/.test(lower)) {
-              params.action = "prune";
-              Object.assign(params, parseDaysAndDryRun(rawCommand.replace(/^prune\b/i, "")));
-            } else {
-              // Default: treat as prompt to Pi.
-              params.action = "send";
-              params.message = rawCommand;
-            }
+            params.action = parsed.action;
+            if ("message" in parsed) params.message = parsed.message;
+            if ("cwd" in parsed) params.cwd = parsed.cwd;
           }
 
           const actionRaw = String(readString(params, "action", { required: true }) ?? "");
           const action = actionRaw.trim().toLowerCase() as CodingSessionsToolAction;
+
+          if (REMOVED_ASKPI_ACTIONS.has(actionRaw.trim().toLowerCase())) {
+            return textResult(`Unknown /askpi command: ${actionRaw.trim()}. Run /askpi help.`, {
+              ok: false,
+              error: "unknown_command",
+            });
+          }
+
+          if (action === "help") {
+            return textResult(renderAskpiHelpText(), { ok: true, action: "help" });
+          }
 
           const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey.trim() : "";
           if (!sessionKey) {
@@ -2071,15 +2066,19 @@ export default {
             });
           }
 
-          if (action === "ensure") {
+          if (action === "new") {
             return await withRecordLock(recordPath, async () => {
-            let cwd = String(readString(params, "cwd", { required: true }) ?? "");
+            const existingRecord = await readJsonFile<CodingSessionRecordV1>(recordPath);
+            let cwd = String(readString(params, "cwd") ?? existingRecord?.cwd ?? "");
+            if (!cwd) {
+              return jsonResult({
+                ok: false,
+                error: "cwd required for first run. Use: /askpi new /ABS/PATH",
+              });
+            }
             if (!cwd.startsWith("/")) {
               return jsonResult({ ok: false, error: "cwd must be an absolute path" });
             }
-
-            // Validate the directory exists. tmux may silently fall back to $HOME when -c is invalid.
-            // Also resolve symlinks/real path to avoid mismatched casing on case-sensitive filesystems.
             try {
               const st = await fs.stat(cwd);
               if (!st.isDirectory()) {
@@ -2090,127 +2089,84 @@ export default {
               return jsonResult({ ok: false, error: `cwd does not exist: ${cwd}` });
             }
 
-            const id = shortHash(sessionKey);
-            const computedTmuxName = `${pluginCfg.tmuxPrefix}-${id}`;
-            const existingRecord = await readJsonFile<CodingSessionRecordV1>(recordPath);
-            const record = existingRecord ??
-              (await buildRecord({
-                agentId,
+            let archivePath: string | null = null;
+            if (existingRecord) {
+              archivePath = await archiveAskpiRecord({
                 agentRootDir,
                 sessionKey,
-                cwd,
-                tmuxName: computedTmuxName,
-                deliveryResolvers: pluginCfg.deliveryResolvers,
-              }));
-
-            // Keep records forward-compatible when we rename/move the Pi notify extension.
-            // Without this, older records may still point at a stale `.../extensions/coding-sessions/...` path.
-            const extensionPath = resolvePiExtensionPath();
-            const sessionDir =
-              (typeof record.pi?.sessionDir === "string" && record.pi.sessionDir.trim())
-                ? record.pi.sessionDir.trim()
-                : resolvePiSessionDir(agentRootDir, sessionKey);
-            await fs.mkdir(sessionDir, { recursive: true });
-            record.pi.sessionDir = sessionDir;
-            record.pi.extensionPath = extensionPath;
-            record.pi.piArgs = buildFreshPiArgs({ sessionDir, extensionPath, continueLast: true });
-
-            record.cwd = cwd;
-            // Do not forcibly rename an existing tmux session.
-            // If a record already exists and its tmux session is still present, keep using it.
-            const existingName = typeof existingRecord?.tmux?.name === "string" ? existingRecord.tmux.name.trim() : "";
-            if (existingName && (await tmuxHasSession(existingName))) {
-              record.tmux.name = existingName;
-            } else {
-              record.tmux.name = computedTmuxName;
-            }
-            record.updatedAt = Date.now();
-
-            // Capture delivery hint for later callbacks (Discord thread/channel id, Telegram topic, ...).
-            // This makes notify delivery robust even when the session store entry can't be found.
-            record.delivery =
-              record.delivery ??
-              (await readSessionDeliveryHint({
-                agentRootDir,
-                sessionKey,
-                deliveryResolvers: pluginCfg.deliveryResolvers,
-              })) ??
-              undefined;
-
-            // If the session already exists and the user changes cwd, restart tmux so the new
-            // -c takes effect. Otherwise tmux may keep running in the previous (or fallback) directory.
-            const cwdChanged = Boolean(existingRecord) && typeof existingRecord?.cwd === "string" && existingRecord.cwd !== cwd;
-            if (cwdChanged && (await tmuxHasSession(record.tmux.name))) {
-              if (existingRecord?.inFlight) {
-                return jsonResult({
-                  ok: false,
-                  error:
-                    "This session is currently busy (inFlight). Wait for completion or use /askpi stop, then /askpi ensure again.",
-                });
+                record: existingRecord,
+                reason: "new",
+              });
+              const existingName = typeof existingRecord.tmux?.name === "string"
+                ? existingRecord.tmux.name.trim()
+                : "";
+              if (existingName && (await tmuxHasSession(existingName))) {
+                await tmuxKillSession(existingName);
               }
-              await tmuxKillSession(record.tmux.name);
             }
+
+            const record = await buildRecord({
+              agentId,
+              agentRootDir,
+              sessionKey,
+              cwd,
+              tmuxName: `${pluginCfg.tmuxPrefix}-${shortHash(sessionKey)}`,
+              codingSessionId: createCodingSessionId(sessionKey),
+              deliveryResolvers: pluginCfg.deliveryResolvers,
+            });
 
             const tmuxResult = await ensureTmuxSession({ record, pluginCfg });
             await writeJsonAtomic(recordPath, record);
 
             return jsonResult({
               ok: true,
-              action: "ensure",
+              action: "new",
               created: tmuxResult.created,
               tmux: record.tmux.name,
               cwd,
               codingSessionId: record.codingSessionId,
               piSessionDir: record.pi.sessionDir,
+              archivedPrevious: Boolean(existingRecord),
+              archivePath,
             });
           });
           }
 
           if (action === "reset") {
             return await withRecordLock(recordPath, async () => {
-            // Reset = kill tmux + start a fresh Pi session context (new sessionDir), optionally with a new cwd.
+            // Reset = keep the same session id, but restart runtime state and Pi session files.
             const existing = await readJsonFile<CodingSessionRecordV1>(recordPath);
             if (!existing) {
               return jsonResult({
                 ok: false,
-                error: "No askpi session for this chat. Run /askpi ensure first.",
+                error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
               });
             }
 
             const cwdRaw = readString(params, "cwd");
-            if (cwdRaw && !cwdRaw.startsWith("/")) {
-              return jsonResult({ ok: false, error: "cwd must be an absolute path" });
+            if (cwdRaw) {
+              return jsonResult({
+                ok: false,
+                error: "reset does not accept cwd. Use /askpi new [/ABS/PATH] to change directories.",
+              });
             }
 
-            // Validate cwd (either provided, or the stored one).
-            // Do this before killing tmux so we don't destroy a session and then fail.
+            // Validate existing cwd before stopping the active session.
             let resolvedCwd = existing.cwd;
-            if (cwdRaw) {
-              try {
-                const st = await fs.stat(cwdRaw);
-                if (!st.isDirectory()) {
-                  return jsonResult({ ok: false, error: `cwd is not a directory: ${cwdRaw}` });
-                }
-                resolvedCwd = await fs.realpath(cwdRaw);
-              } catch {
-                return jsonResult({ ok: false, error: `cwd does not exist: ${cwdRaw}` });
-              }
-            } else {
-              try {
-                const st = await fs.stat(resolvedCwd);
-                if (!st.isDirectory()) {
-                  return jsonResult({
-                    ok: false,
-                    error:
-                      `Current cwd is not a directory: ${resolvedCwd}. Provide a new cwd: /askpi reset /ABS/PATH`,
-                  });
-                }
-              } catch {
+            try {
+              const st = await fs.stat(resolvedCwd);
+              if (!st.isDirectory()) {
                 return jsonResult({
                   ok: false,
-                  error: `Current cwd does not exist: ${resolvedCwd}. Provide a new cwd: /askpi reset /ABS/PATH`,
+                  error: `Current cwd is not a directory: ${resolvedCwd}. Run /askpi new /ABS/PATH.`,
                 });
               }
+              resolvedCwd = await fs.realpath(resolvedCwd);
+            } catch {
+              return jsonResult({
+                ok: false,
+                error: `Current cwd does not exist: ${resolvedCwd}. Run /askpi new /ABS/PATH.`,
+              });
             }
 
             // Stop tmux session if present.
@@ -2267,7 +2223,7 @@ export default {
           if (!record) {
             return jsonResult({
               ok: false,
-              error: "No askpi session for this chat. Run /askpi ensure first.",
+              error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
             });
           }
 
@@ -2277,7 +2233,7 @@ export default {
               if (!record) {
                 return jsonResult({
                   ok: false,
-                  error: "No askpi session for this chat. Run /askpi ensure first.",
+                  error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
                 });
               }
 
@@ -2342,7 +2298,7 @@ export default {
             });
           }
 
-          if (action === "diagnose") {
+          if (action === "status") {
             const name = record.tmux.name;
             const exists = await tmuxHasSession(name);
             const paneCwd = exists ? await tmuxPaneCwd(name) : null;
@@ -2357,7 +2313,7 @@ export default {
             const socketConfig = resolveAskpiTmuxSocketConfig();
             const attachCmd = buildAskpiTmuxAttachCommand(name);
             const lines: string[] = [];
-            lines.push(`Diagnose (${record.codingSessionId})`);
+            lines.push(`Status (${record.codingSessionId})`);
             lines.push(`sessionKey: ${record.sessionKey}`);
             lines.push(`tmux: ${name}${exists ? "" : " (missing)"}`);
             lines.push(`tmux socket: ${socketConfig.displayArgs}`);
@@ -2415,7 +2371,7 @@ export default {
 
             return textResult(lines.join("\n"), {
               ok: true,
-              action: "diagnose",
+              action: "status",
               tmux: name,
               exists,
               paneCwd,
@@ -2431,7 +2387,7 @@ export default {
               if (!record) {
                 return jsonResult({
                   ok: false,
-                  error: "No askpi session for this chat. Run /askpi ensure first.",
+                  error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
                 });
               }
 
@@ -2453,7 +2409,7 @@ export default {
               if (!record) {
                 return jsonResult({
                   ok: false,
-                  error: "No askpi session for this chat. Run /askpi ensure first.",
+                  error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
                 });
               }
 
@@ -2497,7 +2453,7 @@ export default {
                 return {
                   result: jsonResult({
                     ok: false,
-                    error: "No askpi session for this chat. Run /askpi ensure first.",
+                    error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
                   }),
                   promptLog: null as null | {
                     delivery: {
@@ -2517,7 +2473,7 @@ export default {
                 return {
                   result: jsonResult({
                     ok: false,
-                    error: `tmux session not running: ${name}. Run /askpi ensure again.`,
+                    error: `tmux session not running: ${name}. Run /askpi new or /askpi reset.`,
                   }),
                   promptLog: null,
                 };
@@ -2636,7 +2592,7 @@ export default {
               if (!record) {
                 return jsonResult({
                   ok: false,
-                  error: "No askpi session for this chat. Run /askpi ensure first.",
+                  error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
                 });
               }
 
@@ -2721,7 +2677,7 @@ export default {
               if (!record) {
                 return jsonResult({
                   ok: false,
-                  error: "No askpi session for this chat. Run /askpi ensure first.",
+                  error: "No askpi session for this chat. Run /askpi new [/ABS/PATH] first.",
                 });
               }
 
