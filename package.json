@@ -1,6 +1,6 @@
 {
   "name": "@dougvk/askpi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenClaw askpi plugin: per-chat Pi RPC + tmux sessions with handoff/resume/reset/new workflow.",
   "type": "module",
   "license": "UNLICENSED",
@@ -19,7 +19,6 @@
     "index.ts",
     "lib.js",
     "openclaw.plugin.json",
-    "clawdbot.plugin.json",
     "pi/",
     "README.md",
     "PUBLISHING.md"

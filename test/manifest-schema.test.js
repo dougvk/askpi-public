@@ -7,7 +7,7 @@ import test from "node:test";
 import askpi from "../index.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const manifestPath = path.resolve(__dirname, "..", "clawdbot.plugin.json");
+const manifestPath = path.resolve(__dirname, "..", "openclaw.plugin.json");
 const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
 
 test("manifest schema keys align with validator", () => {
