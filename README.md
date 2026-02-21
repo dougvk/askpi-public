@@ -13,12 +13,16 @@ OpenClaw plugin that runs one Pi coding runtime per chat session, backed by dedi
 - `/askpi handoff`
 - `/askpi resume`
 
-## Behavior
+## Command Behavior
 
-- `new` archives prior session state and starts a fresh session id.
-- `reset` keeps the current session id and restarts runtime state.
-- `status` returns a single status mode tailored to askpi RPC/tmux session state.
-- Old aliases (`ensure`, `start`, `info`, `diagnose`, etc.) are intentionally removed.
+- `/askpi help`: shows command usage for this plugin.
+- `/askpi status`: returns a single status mode tailored to askpi RPC/tmux session state.
+- `/askpi new [abs path]`: archives prior session state and starts a fresh session id.
+- `/askpi <prompt>`: sends a prompt to Pi; if Pi is already streaming, the message is queued as a follow-up.
+- `/askpi stop`: stops the active tmux session for this chat and clears in-flight runtime state.
+- `/askpi reset`: keeps the current session id and restarts runtime state.
+- `/askpi handoff`: switches the chat session into interactive Pi TUI handoff and returns attach/resume instructions.
+- `/askpi resume`: restarts Pi RPC automation for the same chat session after handoff/manual use.
 
 ## Requirements
 
