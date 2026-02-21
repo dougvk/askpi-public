@@ -34,6 +34,10 @@ type PluginConfig = {
   deliveryResolvers?: DeliveryResolverConfig[];
 };
 
+type AskpiIsolationCheck =
+  | { ok: true }
+  | { ok: false; error: string };
+
 type DeliveryResolverConfig = {
   channel: string;
   pattern: string;
@@ -106,16 +110,13 @@ export function buildAskpiTmuxAttachCommand(
 // only what we need for safe operation. Schema/UI hints live in the manifest.
 const PluginConfigSchema = {
   allowedKeys: ["token", "tmuxPrefix", "httpPath", "deliveryResolvers"] as const,
-  requiredKeys: ["token"] as const,
+  requiredKeys: [] as const,
   validate(value: unknown): { ok: true; value?: unknown } | { ok: false; errors: string[] } {
     const errors: string[] = [];
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return { ok: false, errors: ["<root>: expected object"] };
     }
     const obj = value as Record<string, unknown>;
-
-    const token = typeof obj.token === "string" ? obj.token.trim() : "";
-    if (!token) errors.push("token: required");
 
     if ("tmuxPrefix" in obj && obj.tmuxPrefix != null && typeof obj.tmuxPrefix !== "string") {
       errors.push("tmuxPrefix: expected string");
@@ -392,6 +393,46 @@ function resolvePluginConfig(api: any): Required<PluginConfig> {
     : "/askpi/notify";
   const deliveryResolvers = normalizeDeliveryResolvers(raw.deliveryResolvers, api?.logger);
   return { token, tmuxPrefix, httpPath, deliveryResolvers };
+}
+
+function hasExplicitEnvPath(env: NodeJS.ProcessEnv, key: string): boolean {
+  const raw = env[key];
+  return typeof raw === "string" && raw.trim().length > 0;
+}
+
+export function validateAskpiIsolationEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): AskpiIsolationCheck {
+  const hasStateRoot =
+    hasExplicitEnvPath(env, "OPENCLAW_STATE_DIR") || hasExplicitEnvPath(env, "CLAWDBOT_STATE_DIR");
+  const hasDedicatedTmuxSocket =
+    hasExplicitEnvPath(env, ASKPI_TMUX_SOCKET_PATH_ENV_KEY) ||
+    hasExplicitEnvPath(env, ASKPI_TMUX_SOCKET_NAME_ENV_KEY) ||
+    hasExplicitEnvPath(env, OPENCLAW_TMUX_SOCKET_DIR_ENV_KEY) ||
+    hasExplicitEnvPath(env, CLAWDBOT_TMUX_SOCKET_DIR_ENV_KEY);
+
+  const missing: string[] = [];
+  if (!hasStateRoot) {
+    missing.push(
+      "set OPENCLAW_STATE_DIR (or CLAWDBOT_STATE_DIR) to a dedicated environment state root so askpi session directories are isolated",
+    );
+  }
+  if (!hasDedicatedTmuxSocket) {
+    missing.push(
+      `set ${ASKPI_TMUX_SOCKET_PATH_ENV_KEY} (recommended) or ${ASKPI_TMUX_SOCKET_NAME_ENV_KEY} to isolate askpi tmux sessions`,
+    );
+  }
+
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      error:
+        `askpi requires explicit isolated state setup before loading:\n- ${missing.join("\n- ")}\n` +
+        "After configuring these values, restart the gateway.",
+    };
+  }
+
+  return { ok: true };
 }
 
 let pluginApi: any = null;
@@ -1569,6 +1610,11 @@ export default {
   configSchema: PluginConfigSchema,
 
   register: (api: any) => {
+    const isolation = validateAskpiIsolationEnv(process.env);
+    if (!isolation.ok) {
+      throw new Error(isolation.error);
+    }
+
     pluginApi = api;
     pluginRootDir = typeof api?.source === "string" ? path.dirname(api.source) : null;
     const pluginCfg = resolvePluginConfig(api);
@@ -1631,6 +1677,21 @@ export default {
 
           if (action === "help") {
             return textResult(renderAskpiHelpText(), { ok: true, action: "help" });
+          }
+
+          const needsNotifyToken =
+            action === "new" ||
+            action === "send" ||
+            action === "reset" ||
+            action === "resume";
+          if (needsNotifyToken && !pluginCfg.token) {
+            return textResult(
+              "askpi token is not configured. Set plugins.entries.askpi.config.token, then retry.",
+              {
+                ok: false,
+                error: "missing_token",
+              },
+            );
           }
 
           const sessionKey = typeof ctx.sessionKey === "string" ? ctx.sessionKey.trim() : "";

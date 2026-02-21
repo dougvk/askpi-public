@@ -1,0 +1,37 @@
+{
+  "name": "@dougvk/askpi",
+  "version": "0.1.0",
+  "description": "OpenClaw askpi plugin: per-chat Pi RPC + tmux sessions with handoff/resume/reset/new workflow.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "keywords": [
+    "openclaw",
+    "plugin",
+    "askpi",
+    "tmux"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "lib.js",
+    "openclaw.plugin.json",
+    "clawdbot.plugin.json",
+    "pi/",
+    "README.md",
+    "PUBLISHING.md"
+  ],
+  "scripts": {
+    "test": "tsx --test test/*.test.js",
+    "pack:check": "npm pack --dry-run"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.6"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  }
+}

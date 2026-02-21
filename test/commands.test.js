@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { parseAskpiRawCommand } from "../index.ts";
+import { parseAskpiRawCommand, validateAskpiIsolationEnv } from "../index.ts";
 
 test("parseAskpiRawCommand maps canonical commands", () => {
   assert.deepEqual(parseAskpiRawCommand(""), { action: "help" });
@@ -30,4 +30,17 @@ test("parseAskpiRawCommand defaults to send for free-form prompts", () => {
     action: "send",
     message: "new feature request",
   });
+});
+
+test("validateAskpiIsolationEnv requires explicit state root and tmux socket isolation", () => {
+  const missing = validateAskpiIsolationEnv({});
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /OPENCLAW_STATE_DIR/);
+  assert.match(missing.error, /OPENCLAW_ASKPI_TMUX_SOCKET_PATH/);
+
+  const valid = validateAskpiIsolationEnv({
+    OPENCLAW_STATE_DIR: "/tmp/openclaw-askpi-state",
+    OPENCLAW_ASKPI_TMUX_SOCKET_PATH: "/tmp/openclaw-askpi-state/tmux/askpi.sock",
+  });
+  assert.deepEqual(valid, { ok: true });
 });
